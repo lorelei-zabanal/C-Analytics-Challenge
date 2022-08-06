@@ -1,0 +1,218 @@
+/*NAME: new_crm_accts*/
+SELECT *
+FROM new_crm_accts;
+
+/*NAME: crm_opportunity*/
+SELECT * FROM new_crm_opps;
+
+/*NAME: crm_users*/
+SELECT * 
+FROM crm_users;
+
+---------TEMP TABLES---------
+DROP TABLE IF EXISTS new_crm_accts, new_crm_opps;
+
+create temp table new_crm_accts as 
+SELECT DISTINCT 
+	distinct_accts.account_id, 
+	case 
+		when new_customers.account_id is not null then 'Customer' 
+		else distinct_accts.distinct_acct_type
+		end as new_acct_type
+FROM 
+	(
+		SELECT DISTINCT 
+			account_id, 
+			min(account_type) as distinct_acct_type
+		FROM crm_accounts
+		WHERE crm_accounts.is_deleted = 'N'
+		GROUP BY 1
+	) distinct_accts
+LEFT JOIN 
+	(
+		SELECT DISTINCT 
+			account_id,
+			close_date 
+		FROM crm_opportunity
+		WHERE crm_opportunity.is_deleted = 'N'
+			AND crm_opportunity.stage = 'Closed-Won'
+			AND type = 'New Logo'
+	) new_customers
+		ON new_customers.account_id = distinct_accts.account_id 
+ORDER BY 1;
+
+create temp table new_crm_opps as 
+
+SELECT DISTINCT 
+	'Q' || EXTRACT(quarter FROM close_date) || ' ' || EXTRACT(year FROM close_date) AS quarter_closed,
+	date_clean.*,
+	round(tcv::numeric / contract_length_yrs) as ARR
+FROM 
+	(
+		SELECT DISTINCT 
+			id, stage, account_id, to_date(close_date, 'YYYY/MM/DD') as close_date, to_date(created_date, 'YYYY/MM/DD') AS created_date, 
+			lead_source, type, sales_rep, csm_assigned, 
+			case 
+				when amount_total = ' -   ' then '0'
+				else amount_total
+				end as tcv, 
+			subscription_months::numeric, round(subscription_months::numeric/12, 1) as contract_length_yrs
+		FROM crm_opportunity
+		WHERE crm_opportunity.is_deleted = 'N'
+		ORDER BY account_id
+	) date_clean
+ORDER BY account_id;
+
+---------NEW LOGOS QUERIES---------
+/*NAME: New Logos in FY 2020*/
+SELECT DISTINCT 
+	EXTRACT(year FROM close_date) AS year,
+	EXTRACT(quarter FROM close_date) AS quarter,
+	quarter_closed, 
+	count(distinct account_id) as new_customers
+FROM new_crm_opps
+WHERE stage = 'Closed-Won'
+	AND type = 'New Logo'
+	AND close_date between '2020-02-01' and '2021-01-31'
+GROUP BY 1,2,3
+ORDER BY 1,2;
+
+/*NAME: New Logos by Territory*/
+SELECT DISTINCT 
+	count(distinct account_id) as new_customers,
+	count(distinct account_id) filter (where crm_users.territory = 'Commercial') as commercial_team,
+	sum(arr) filter (where crm_users.territory = 'Commercial') as commercial_arr,
+	count(distinct account_id) filter (where crm_users.territory = 'Enterprise') as enterprise_team,
+	sum(arr) filter (where crm_users.territory = 'Enterprise') as enterprise_arr,
+	count(distinct account_id) filter (where crm_users.territory = 'New Verticals') as new_verticals_team,
+	sum(arr) filter (where crm_users.territory = 'New Verticals') as new_verticals_arr
+FROM new_crm_opps
+LEFT JOIN crm_users 
+	ON crm_users.id = new_crm_opps.sales_rep
+WHERE stage = 'Closed-Won'
+	AND type = 'New Logo'
+	AND close_date between '2020-02-01' and '2021-01-31';
+
+/*NAME: Most Productive Lead Sources for Closed Business*/
+SELECT DISTINCT 
+	lead_source, 
+	sum(arr) as total_arr,
+	count(distinct account_id) as new_customers
+FROM new_crm_opps
+WHERE stage = 'Closed-Won'
+	AND type = 'New Logo'
+	AND close_date between '2020-02-01' and '2021-01-31'
+GROUP BY 1
+ORDER BY 2 ASC;
+
+---------RENEWAL QUERIES---------
+/*NAME: Renewal Closed Won & Lost in FY 2020*/
+SELECT DISTINCT 
+	EXTRACT(year FROM close_date) AS year,
+	EXTRACT(quarter FROM close_date) AS quarter,
+	quarter_closed, 
+	count(distinct account_id) filter (where stage = 'Closed-Won') as renewed_customers, 
+	count(distinct account_id) filter (where stage = 'Closed-Lost') as churned_customers  
+FROM new_crm_opps
+WHERE type = 'Renewal'
+	AND close_date between '2020-02-01' and '2021-01-31'
+GROUP BY 1,2,3
+ORDER BY 1,2;
+
+/*NAME: Customer Renewals by Team*/
+SELECT DISTINCT 
+	count(distinct account_id) as renewed_customers,
+	count(distinct account_id) filter (where crm_users.territory = 'Commercial') as commercial_team,
+	sum(arr) filter (where crm_users.territory = 'Commercial') as commercial_arr,
+	count(distinct account_id) filter (where crm_users.territory = 'Mid-Market') as midmarket_team,
+	sum(arr) filter (where crm_users.territory = 'Mid-Market') as midmarket_arr,
+	count(distinct account_id) filter (where crm_users.territory = 'Enterprise') as enterprise_team,
+	sum(arr) filter (where crm_users.territory = 'Enterprise') as enterprise_arr,
+	count(distinct account_id) filter (where crm_users.territory = 'New Verticals') as new_verticals_team,
+	sum(arr) filter (where crm_users.territory = 'New Verticals') as new_verticals_arr
+FROM new_crm_opps
+LEFT JOIN crm_users 
+	ON crm_users.id = new_crm_opps.csm_assigned
+WHERE type = 'Renewal'
+	AND stage = 'Closed-Won'
+	AND close_date between '2020-02-01' and '2021-01-31';
+	
+/*NAME: Customer Renewals Churn Rate*/
+SELECT distinct 
+	count(distinct account_id) filter (where stage = 'Closed-Won') as renewed_customers,
+	count(distinct account_id) filter (where stage = 'Closed-Lost') as churned_customers
+FROM new_crm_opps
+where type in ('Renewal')
+	AND close_date between '2020-02-01' and '2021-01-31';
+
+/*NAME: Customer Renewals Without Expansion Opportunity*/
+select distinct
+	count(distinct new_crm_opps.account_id) filter (where expansion_opps.account_id IS NOT NULL)
+from new_crm_opps
+left join 
+(
+	select distinct account_id 
+	FROM new_crm_opps
+	WHERE type = 'Expansion'
+		AND close_date between '2020-02-01' and '2021-01-31'
+)expansion_opps
+	on new_crm_opps.account_id = expansion_opps.account_id 
+WHERE type = 'Renewal'
+	AND stage = 'Closed-Won'
+	AND close_date between '2020-02-01' and '2021-01-31';
+	
+---------EXPANSION QUERIES---------
+/*NAME: Expansion Opportunities Won*/
+select distinct 
+	quarter_closed, 
+	count(distinct account_id) 
+FROM new_crm_opps
+WHERE type = 'Expansion'
+	AND close_date between '2020-02-01' and '2021-01-31'
+	AND stage = 'Closed-Won' 
+GROUP BY 1
+ORDER BY quarter_closed;
+
+/*NAME: Expansion Opportunities Won by Team*/
+select distinct 
+	EXTRACT(year FROM close_date) AS year,
+	EXTRACT(quarter FROM close_date) AS quarter,
+	quarter_closed, 
+	count(distinct account_id) filter (where crm_users.territory = 'Commercial') as commercial_team,
+	count(distinct account_id) filter (where crm_users.territory = 'Mid-Market') as midmarket_team,
+	count(distinct account_id) filter (where crm_users.territory = 'Enterprise') as enterprise_team,
+	count(distinct account_id) filter (where crm_users.territory = 'New Verticals') as new_verticals_team
+FROM new_crm_opps
+LEFT JOIN crm_users 
+	ON crm_users.id = new_crm_opps.csm_assigned
+WHERE type = 'Expansion'
+	AND close_date between '2020-02-01' and '2021-01-31'
+	AND stage = 'Closed-Won' 
+GROUP BY 1,2,3
+ORDER BY 1,2;
+
+---------UNUSED QUERIES---------
+/*NAME: Number of Opportunities a Company has*/
+select distinct 
+	account_id, 
+	count(distinct id) filter (where type = 'New Logo') as new_biz_opp, 
+	count(distinct id) filter (where type = 'Renewal') as renewal_opp,
+	count(distinct id) filter (where type = 'Expansion') as expansion_opp
+from new_crm_opps 
+group by 1
+
+/*NAME: Length of Renewal Opportunity*/
+select 
+	round(avg(close_date - created_date) filter (where stage = 'Closed-Won'), 1) as avg_won_renewal_length,
+	round(avg(close_date - created_date) filter (where stage = 'Closed-Lost'), 1) as avg_lost_renewal_length
+from new_crm_opps 
+where type = 'Renewal'
+	and close_date between '2020-02-01' and '2021-01-31'; 
+
+/*NAME: Length of New Business Opportunity*/
+select 
+	round(avg(close_date - created_date) filter (where stage = 'Closed-Won'), 1) as avg_won_renewal_length,
+	round(avg(close_date - created_date) filter (where stage = 'Closed-Lost'), 1) as avg_lost_renewal_length
+from new_crm_opps 
+where type = 'New Logo'
+	and close_date between '2020-02-01' and '2021-01-31'; 
